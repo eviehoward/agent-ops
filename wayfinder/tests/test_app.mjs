@@ -96,6 +96,66 @@ test("Get started and the first install card open the Agent Ops guide", async ()
   assert.equal(roots["content-inner"].textContent.includes("undefined"), false);
 });
 
+test("Dashboard and testing appears before the alternative sandboxes without a fresh snapshot", async () => {
+  const { context } = await boot();
+  context.product = catalog.products[0];
+  const section = vm.runInContext("renderImages(product, null)", context);
+  const groups = section.querySelectorAll(".image-group");
+  assert.deepEqual(groups.map(group => descendants(group).find(node => node.tagName === "h3").textContent), [
+    "Core images", "Dashboard and testing", "Alternative runtimes",
+  ]);
+  const cards = groups[2].querySelectorAll(".image-card");
+  assert.deepEqual(cards.map(card => descendants(card).find(node => node.tagName === "h4").textContent), [
+    "Sandbox (OpenClaw)", "Sandbox (OpenCode)",
+    "Sandbox (Pi)", "Sandbox (Codex)", "Sandbox (Goose)",
+  ]);
+  const codex = cards[3];
+  assert.equal(codex.querySelectorAll(".image-command")[0].textContent,
+    "podman pull quay.io/aipcc/base-images/agentic/codex:0.167.0");
+});
+
+test("documentation shows all grouped guides without pagination", async () => {
+  const { context } = await boot();
+  context.product = catalog.products[0];
+  const section = vm.runInContext("renderDocs(product)", context);
+  const cards = section.querySelectorAll(".doc-card");
+  assert.equal(cards.length, catalog.products[0].docs.length);
+  assert.equal(section.querySelectorAll(".pager").length, 0);
+  assert.equal(cards.find(card => card.textContent.includes("Architecture")).href,
+    "https://docs.nvidia.com/openshell/latest/about/architecture");
+  assert.match(section.textContent, /Agent Ops guides/);
+  assert.match(section.textContent, /NVIDIA OpenShell documentation/);
+  assert.match(section.textContent, /match your deployment/);
+});
+
+test("NVIDIA documentation selector changes links and handles missing pages", async () => {
+  const { context } = await boot();
+  const architecture = "https://docs.nvidia.com/openshell/latest/about/architecture";
+  context.product = catalog.products[0];
+  context.live = { docsVersions: {
+    versions: [{ id: "latest", label: "Latest (v0.1.10)" }, { id: "v0.0.116", label: "v0.0.116" }],
+    pages: { [architecture]: {},
+      "https://docs.nvidia.com/openshell/latest/security/best-practices": {
+        "v0.0.116": "https://docs.nvidia.com/openshell/v0.0.116/security/best-practices",
+      } },
+  } };
+  const section = vm.runInContext("renderDocs(product, live)", context);
+  const picker = section.querySelectorAll(".docs-version-picker")[0].children.find(n => n.tagName === "select");
+  assert.equal(picker.value, "latest");
+  assert.match(picker.textContent, /Latest \(v0.1.10\)/);
+  picker.value = "v0.0.116";
+  picker.listeners.change();
+  const cards = section.querySelectorAll(".doc-card");
+  assert.equal(cards.find(card => card.textContent.includes("Architecture")).tagName, "div");
+  assert.match(cards.find(card => card.textContent.includes("Architecture")).textContent, /Not available/);
+  assert.equal(cards.find(card => card.textContent.includes("Security best practices")).href,
+    "https://docs.nvidia.com/openshell/v0.0.116/security/best-practices");
+  assert.equal(cards.find(card => card.textContent.includes("Getting started")).href, guide);
+  picker.value = "latest";
+  picker.listeners.change();
+  assert.equal(section.querySelectorAll(".doc-card").find(card => card.textContent.includes("Architecture")).href, architecture);
+});
+
 test("a published E2E image cannot override a failing CI run", async () => {
   const { context } = await boot();
   context.fixture = {

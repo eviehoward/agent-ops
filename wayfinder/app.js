@@ -76,11 +76,29 @@ function renderPager(page, totalPages, onPage) {
   return bar;
 }
 
-async function copyCmd(text, btn) {
-  const orig = btn.textContent;
-  try { await navigator.clipboard.writeText(text); btn.textContent = "Copied!"; }
-  catch { btn.textContent = "Error"; }
-  setTimeout(() => { btn.textContent = orig; }, 1400);
+const copyAttempts = new WeakMap();
+
+async function copyCmd(text, feedback, original = feedback.textContent) {
+  const previous = copyAttempts.get(feedback);
+  const attempt = { original: previous?.original ?? original };
+  copyAttempts.set(feedback, attempt);
+  let copied;
+  try {
+    await navigator.clipboard.writeText(text);
+    copied = true;
+  } catch {
+    copied = false;
+  }
+  if (copyAttempts.get(feedback) !== attempt) return;
+  feedback.textContent = copied ? "Copied!" : "Error";
+  if (copied) feedback.dataset.copied = "";
+  else delete feedback.dataset.copied;
+  setTimeout(() => {
+    if (copyAttempts.get(feedback) !== attempt) return;
+    feedback.textContent = attempt.original;
+    delete feedback.dataset.copied;
+    copyAttempts.delete(feedback);
+  }, 1400);
 }
 
 function cmdBlock(value) {
@@ -159,15 +177,32 @@ function validateData(data, kind) {
       for (const key of ["docs", "downloads"]) {
         entries(product, key, path, (item, itemPath) => {
           requireText(item.title, `${itemPath}.title`);
-          textFields(item, ["detail", "value", "icon"], itemPath);
+          textFields(item, ["detail", "value", "icon", "group"], itemPath);
           if (key === "docs" || item.url != null) webLink(item.url, `${itemPath}.url`);
         });
+      }
+    }
+    if (product.docsVersions != null) {
+      requireRecord(product.docsVersions, `${path}.docsVersions`);
+      entries(product.docsVersions, "versions", `${path}.docsVersions`, (version, versionPath) => {
+        requireText(version.id, `${versionPath}.id`);
+        requireText(version.label, `${versionPath}.label`);
+        if (!/^(latest|dev|v\d+\.\d+\.\d+)$/.test(version.id)) throw new TypeError(`Invalid ${versionPath}.id`);
+      }, true);
+      requireRecord(product.docsVersions.pages, `${path}.docsVersions.pages`);
+      for (const [source, versions] of Object.entries(product.docsVersions.pages)) {
+        webLink(source, `${path}.docsVersions.pages key`);
+        requireRecord(versions, `${path}.docsVersions.pages entry`);
+        for (const url of Object.values(versions)) {
+          webLink(url, `${path}.docsVersions.pages URL`);
+          if (new URL(url).origin !== "https://docs.nvidia.com") throw new TypeError("Invalid documentation host");
+        }
       }
     }
     entries(product, "images", path, (image, imagePath) => {
       requireText(image.name, `${imagePath}.name`);
       requireText(image.repository, `${imagePath}.repository`);
-      textFields(image, ["role", "pullTag", "lastModified"], imagePath);
+      textFields(image, ["role", "pullTag", "lastModified", "group"], imagePath);
       if (image.pull != null) {
         requireRecord(image.pull, `${imagePath}.pull`);
         validateTag(image.pull, `${imagePath}.pull`);
@@ -308,7 +343,7 @@ function renderTabContent(tabId, product, live) {
     case "releases": frag.append(renderReleases(product, live)); break;
     case "images": frag.append(renderImages(product, live)); break;
     case "install": frag.append(renderInstall(product)); break;
-    case "docs": frag.append(renderDocs(product)); break;
+    case "docs": frag.append(renderDocs(product, live)); break;
   }
   return frag;
 }
@@ -463,65 +498,168 @@ function renderReleases(product, live) {
   return section;
 }
 
-function renderImageCard(img, liveImg) {
-  const card = el("div", "image-card");
-  const headerRow = el("div", "image-header");
-  headerRow.append(el("h3", null, img.name));
-  if (img.release) headerRow.append(el("span", "image-badge", "Release"));
-  if (img.name === "E2E Tests") headerRow.append(el("span", "image-badge image-badge-e2e", "E2E"));
-  card.append(headerRow);
-  if (img.role) card.append(el("p", "role", img.role));
-  const tag = img.pullTag || "odh-stable";
-  card.append(cmdBlock(`podman pull ${img.repository}:${tag}`));
-  const meta = el("div", "image-meta");
-  if (liveImg?.pull) {
-    meta.append(el("strong", null, tag));
-    meta.append(document.createTextNode(` · ${shortDigest(liveImg.pull.digest)} · ${formatDate(liveImg.pull.lastModified)}`));
-    meta.append(el("br"));
+function imageTagPicker(label, options) {
+  const field = el("label", "image-tag-picker", label);
+  const select = el("select");
+  for (const [value, title] of options) {
+    const option = el("option", null, title);
+    option.value = value;
+    select.append(option);
   }
-  const repo = img.repository.replace("quay.io/", "");
-  meta.append(extLink(`https://quay.io/repository/${repo}`, "View on Quay →", null));
-  card.append(meta);
-
-  if (liveImg?.builds?.length) {
-    const builds = el("div", "image-builds");
-    builds.append(el("span", "image-builds-label", "Recent builds"));
-    for (const b of liveImg.builds.slice(0, 3)) {
-      const bRow = el("div", "image-build-row");
-      const shortName = b.name.length > 20 ? b.name.slice(0, 16) + "…" : b.name;
-      bRow.append(el("span", "image-build-tag", shortName));
-      bRow.title = b.name;
-      if (b.lastModified) bRow.append(el("span", "image-build-time", formatDate(b.lastModified)));
-      builds.append(bRow);
-    }
-    card.append(builds);
-  }
-  return card;
+  field.append(select);
+  return { field, select };
 }
 
-function renderImageGrid(images, liveImages, page) {
-  const container = el("div", null);
-  container.id = "image-grid";
-  const { items, totalPages } = paginate(images, page);
-  const grid = el("div", "image-row");
-  for (const img of items) {
-    grid.append(renderImageCard(img, liveImages.get(img.repository)));
+function defaultImageTag(img) {
+  return img.pullTag || "odh-stable";
+}
+
+function renderImageCard(img, liveImg, sharedTag) {
+  const card = el("article", "image-card");
+  const header = el("header", "image-header");
+  const title = el("div", "image-title");
+  title.append(el("h4", null, img.name));
+  if (img.role) title.append(el("p", "role", img.role));
+  header.append(title);
+  card.append(header);
+
+  const defaultTag = defaultImageTag(img);
+  const repo = img.repository.replace(/^quay\.io\//, "");
+  const tagsUrl = `https://quay.io/repository/${repo}?tab=tags`;
+  const quayLink = extLink(tagsUrl, "View on Quay ↗", "image-quay-link");
+
+  const tags = new Map([[defaultTag, {}]]);
+  const builds = liveImg?.builds || [];
+  const versionTags = builds.filter(tag => /^v?\d+\.\d+\.\d+(?:[-+][\w.-]+)?$/.test(tag.name));
+  for (const tag of [...(liveImg?.channels || []), ...versionTags]) tags.set(tag.name, tag);
+  if (liveImg?.pull) tags.set(liveImg.pull.name || liveImg.pullTag || defaultTag, liveImg.pull);
+
+  let picker;
+  if (!sharedTag && tags.size > 1) {
+    picker = imageTagPicker(null, [...tags.keys()].map(tag => [tag, tag]));
+    picker.select.setAttribute("aria-label", `Tag for ${img.name}`);
+    header.append(picker.field);
   }
-  container.append(grid);
-  const pager = renderPager(page, totalPages, p => {
-    document.getElementById("image-grid").replaceWith(renderImageGrid(images, liveImages, p));
-  });
-  if (pager) container.append(pager);
-  return container;
+
+  const pull = el("div", "image-pull");
+  const command = el("code", "image-command");
+  command.tabIndex = 0;
+  const copy = el("button", "image-copy");
+  const feedback = el("span", "image-copy-icon");
+  feedback.setAttribute("aria-live", "polite");
+  copy.type = "button";
+  copy.title = "Copy pull command";
+  copy.setAttribute("aria-label", `Copy pull command for ${img.name}`);
+  copy.append(feedback);
+  copy.addEventListener("click", () => copyCmd(command.textContent, feedback, ""));
+  pull.append(command, copy);
+  const updated = el("p", "image-meta image-timestamp");
+  const digest = el("code", "image-digest");
+  const registry = el("div", "image-registry");
+  registry.append(digest, quayLink);
+  card.append(pull, updated, registry);
+
+  function update() {
+    const component = sharedTag?.();
+    const tag = component?.tag || picker?.select.value || defaultTag;
+    const metadata = component || tags.get(tag);
+    command.textContent = `podman pull ${img.repository}:${tag}`;
+    updated.textContent = metadata?.lastModified ? `Tag updated ${formatDate(metadata.lastModified)}` : "";
+    digest.textContent = metadata?.digest || "Digest unavailable in this snapshot";
+  }
+
+  if (picker) {
+    picker.select.value = defaultTag;
+    picker.select.addEventListener("change", update);
+  }
+  update();
+
+  const history = el("details", "image-builds");
+  const historyLabel = builds.length ? `Recent builds (${builds.length} cached)` : "Recent builds";
+  history.append(el("summary", null, historyLabel));
+  if (!builds.length) history.append(el("p", "image-meta", "No recent builds in this snapshot."));
+  for (const build of builds) {
+    const row = el("div", "image-build-row");
+    row.append(el("code", "image-build-tag", build.name));
+    if (build.lastModified) row.append(el("p", "image-meta image-timestamp", `Tag updated ${formatDate(build.lastModified)}`));
+    const registry = el("div", "image-registry");
+    registry.append(el("code", "image-digest", build.digest || "Digest unavailable"));
+    const copyDigest = el("button", "image-build-copy");
+    copyDigest.type = "button";
+    copyDigest.disabled = !build.digest;
+    const icon = el("span", "image-copy-icon");
+    icon.setAttribute("aria-hidden", "true");
+    const label = el("span", "image-build-copy-label", "Copy pull command");
+    label.setAttribute("aria-live", "polite");
+    copyDigest.append(label, icon);
+    copyDigest.addEventListener("click", () => copyCmd(`podman pull ${img.repository}@${build.digest}`, label));
+    registry.append(copyDigest);
+    row.append(registry);
+    history.append(row);
+  }
+  history.append(extLink(tagsUrl, "Browse all tags on Quay ↗", "image-tags-link"));
+  card.append(history);
+  return { card, update };
 }
 
 function renderImages(product, live) {
   const section = el("div", "section");
-  section.append(el("h2", null, "Container images"));
-  section.append(el("p", "section-lead", "Published to the Open Data Hub Quay organisation. Pull with podman or docker."));
-  const liveImages = new Map((live?.images || []).map(i => [i.repository, i]));
-  const allImages = product.images || [];
-  section.append(renderImageGrid(allImages, liveImages, 1));
+  const intro = el("header", "images-intro");
+  intro.append(el("h2", null, "Container images"));
+  intro.append(el("p", "section-lead", "Published to the Open Data Hub and AIPCC Quay organisations. Pull with Podman or Docker."));
+  section.append(intro);
+  const liveImages = new Map((live?.images || []).map(image => [image.repository, image]));
+  const images = product.images || [];
+  const core = images.filter(image => image.release);
+  const groups = new Map();
+  for (const image of images.filter(image => !image.release)) {
+    const title = image.group || "Additional images";
+    if (!groups.has(title)) groups.set(title, []);
+    groups.get(title).push(image);
+  }
+
+  if (core.length) {
+    const group = el("section", "image-group");
+    const header = el("header", "image-group-header");
+    const title = el("div");
+    title.append(el("h3", null, "Core images"));
+    title.append(el("p", null, "Each release tag is available for all core images."));
+    const releases = new Map();
+    for (const release of live?.releases || []) {
+      if (!release.allBuilt) continue;
+      const components = new Map(release.components.filter(c => c.found).map(c => [c.repository, c]));
+      if (core.every(image => components.has(image.repository))) releases.set(release.tag, components);
+    }
+    const defaults = new Set(core.map(defaultImageTag));
+    const defaultLabel = defaults.size !== 1 ? "Default tags"
+      : defaults.has("odh-stable") ? "odh-stable (rolling)" : defaultImageTag(core[0]);
+    const picker = imageTagPicker("Core tag", [["", defaultLabel], ...[...releases.keys()].map(tag => [tag, tag])]);
+    header.append(title, picker.field);
+    group.append(header);
+
+    const cards = core.map(image => renderImageCard(image, liveImages.get(image.repository),
+      () => releases.get(picker.select.value)?.get(image.repository)));
+    picker.select.addEventListener("change", () => cards.forEach(({ update }) => update()));
+    group.append(...cards.map(({ card }) => card));
+    section.append(group);
+  }
+
+  const groupDescriptions = new Map([
+    ["Dashboard and testing", "Manage workspaces in the web UI or run end-to-end tests."],
+    ["Alternative runtimes", "Choose a sandbox image with your preferred agent harness built in."],
+  ]);
+  for (const [title, members] of groups) {
+    const group = el("section", "image-group");
+    const header = el("header", "image-group-header");
+    const heading = el("div");
+    heading.append(el("h3", null, title));
+    const description = groupDescriptions.get(title);
+    if (description) heading.append(el("p", null, description));
+    header.append(heading);
+    group.append(header, ...members.map(image => renderImageCard(image, liveImages.get(image.repository)).card));
+    section.append(group);
+  }
+  if (!images.length) section.append(el("p", "section-lead", "No container images listed."));
   return section;
 }
 
@@ -647,31 +785,57 @@ function renderInstall(p) {
   return section;
 }
 
-function renderDocsGrid(docs, page) {
-  const container = el("div", null);
-  container.id = "docs-grid";
-  const { items, totalPages } = paginate(docs, page);
-  const grid = el("div", "cards");
-  for (const doc of items) {
-    const card = extLink(doc.url, null, "card doc-card");
-    card.append(el("h3", null, doc.title));
-    if (doc.detail) card.append(el("p", null, doc.detail));
-    card.append(el("span", "doc-open", "Open →"));
-    grid.append(card);
-  }
-  container.append(grid);
-  const pager = renderPager(page, totalPages, p => {
-    document.getElementById("docs-grid").replaceWith(renderDocsGrid(docs, p));
-  });
-  if (pager) container.append(pager);
-  return container;
-}
-
-function renderDocs(p) {
-  const section = el("div", "section");
+function renderDocs(p, live) {
+  const section = el("div", "section docs-section");
   section.append(el("h2", null, "Documentation"));
   section.append(el("p", "section-lead", "Everything you need to deploy, configure, and operate."));
-  section.append(renderDocsGrid(p.docs || [], 1));
+  const groupDescriptions = new Map([
+    ["Agent Ops guides", "Step-by-step guides and demos to get you started."],
+    ["NVIDIA OpenShell documentation", "Choose the docs that match your deployment. Versions reflect the last sync, Dev follows development builds."],
+    ["Midstream/downstream reference", "OpenShell references for Open Data Hub (ODH) midstream and Red Hat Data Services (RHDS) downstream."],
+  ]);
+  const groups = new Map();
+  for (const doc of p.docs || []) {
+    const group = doc.group || "Documentation";
+    if (!groups.has(group)) groups.set(group, []);
+    groups.get(group).push(doc);
+  }
+  for (const [name, docs] of groups) {
+    const group = el("section", "docs-group");
+    const header = el("header", "docs-group-header");
+    const heading = el("div", "docs-group-heading");
+    heading.append(el("h3", "docs-group-title", name));
+    const description = groupDescriptions.get(name);
+    if (description) heading.append(el("p", "docs-group-note", description));
+    header.append(heading);
+    const nvidia = name === "NVIDIA OpenShell documentation";
+    const metadata = live?.docsVersions;
+    const grid = el("div", "cards docs-cards");
+    function updateCards(version) {
+      const cards = docs.map(doc => {
+        const url = !nvidia || version === "latest" ? doc.url : metadata?.pages?.[doc.url]?.[version];
+        const card = url ? extLink(url, null, "card doc-card") : el("div", "card doc-card doc-unavailable");
+        card.append(el("h4", null, doc.title));
+        if (doc.detail) card.append(el("p", null, doc.detail));
+        card.append(el("span", "doc-open", url ? "Open ↗" : "Not available in this version"));
+        return card;
+      });
+      grid.replaceChildren(...cards);
+    }
+    if (nvidia) {
+      const versions = metadata?.versions || [{ id: "latest", label: "Latest" }];
+      const picker = imageTagPicker("Docs version", versions.map(v => [v.id, v.label]));
+      picker.field.classList.add("docs-version-picker");
+      picker.select.value = "latest";
+      picker.select.addEventListener("change", () => updateCards(picker.select.value));
+      header.append(picker.field);
+    }
+    group.append(header);
+    if (nvidia && !metadata) group.append(el("p", "docs-group-note docs-version-notice", "Version information is unavailable; use the selector on NVIDIA’s site."));
+    updateCards("latest");
+    group.append(grid);
+    section.append(group);
+  }
   return section;
 }
 
