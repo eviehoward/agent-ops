@@ -41,7 +41,12 @@ Adding a new product means adding an entry to `products.json` and running sync.
   is a separate source. Its workflow results are labeled separately from ODH.
 
 The Releases tab discovers `vX.Y.Z-rhaiv.N` tags from ODH midstream and checks
-the four core images in Quay. An NVIDIA upstream release alone does not create
+the four core images in Quay. The Documentation tab separately uses NVIDIA’s
+published documentation versions, refreshed with the status snapshot. Latest is
+the version NVIDIA labels as latest at sync time; Dev follows development builds.
+A page absent from a selected version is marked unavailable. If version metadata
+cannot be fetched, links still open the latest docs and NVIDIA’s own selector.
+An NVIDIA upstream release alone does not create
 an ODH release entry. Published images, test-image availability, and independent
 CI runs do not prove that a particular image set passed deployment validation.
 
@@ -65,8 +70,9 @@ python3 -m http.server 8787   # open http://localhost:8787
 
 ## Data sources
 
-Only public APIs — no credentials stored, no OAuth proxy, no private registries.
+Only public sources — no credentials stored, no OAuth proxy, no private registries.
 
+- **NVIDIA documentation**: published version-switcher metadata on the linked docs pages
 - **Quay tags**: `https://quay.io/api/v1/repository/{ns}/{name}/tag/`
 - **GitHub Actions**: workflow index + latest run per workflow
 - **GitHub token**: `gh auth token` (optional, raises rate limit)

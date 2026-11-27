@@ -16,6 +16,8 @@ import urllib.request
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
 from pathlib import Path
+from html.parser import HTMLParser
+from urllib.parse import urlparse
 from concurrent.futures import ThreadPoolExecutor
 
 ROOT = Path(__file__).resolve().parent
@@ -37,7 +39,7 @@ def is_detail_tag(name: str) -> bool:
     lowered = name.lower()
     if "build-image" in lowered:
         return True
-    if lowered.endswith((".prefetch", ".git", "-linux-amd64", "-linux-arm64")):
+    if lowered.endswith((".prefetch", ".git", "-source", "-linux-amd64", "-linux-arm64")):
         return True
     return "-linux-" in lowered
 
@@ -106,7 +108,12 @@ def summarize_image(image: dict, tags: list[dict]) -> dict:
     builds = [public_tag(tag) for tag in select_build_tags(tags)]
     channels = [public_tag(tag) for tag in select_channels(tags)]
     pull_tag = image.get("pullTag") or "odh-stable"
-    pull = next((tag for tag in channels if tag["name"] == pull_tag), None)
+    matching = max(
+        (tag for tag in tags if tag.get("name") == pull_tag),
+        key=tag_time,
+        default=None,
+    )
+    pull = public_tag(matching) if matching else None
     last_modified = (pull or (builds[0] if builds else None) or {}).get("lastModified")
     return {
         "name": image["name"],
@@ -409,6 +416,76 @@ def fetch_latest_run(repo: str, workflow_id: int, headers: dict[str, str]) -> di
     return runs[0] if runs else None
 
 
+class DocsSwitcherParser(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.in_switcher = False
+        self.parts = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag == "script" and dict(attrs).get("id") == "fern-shared-island-data":
+            self.in_switcher = True
+
+    def handle_data(self, data):
+        if self.in_switcher:
+            self.parts.append(data)
+
+    def handle_endtag(self, tag):
+        if tag == "script":
+            self.in_switcher = False
+
+
+def parse_docs_switcher(html: str, url: str) -> tuple[list[dict], dict[str, str]]:
+    parser = DocsSwitcherParser()
+    parser.feed(html)
+    versions = json.loads("".join(parser.parts))["versionSwitcher"]["versions"]
+    expected = urlparse(url).path.removeprefix("/openshell/latest/").strip("/")
+    options, pages = [], {"latest": url}
+    for version in versions:
+        title, slug = version.get("title", ""), version.get("slug", "")
+        if version.get("hidden"):
+            continue
+        if version.get("default"):
+            if not re.fullmatch(r"Latest \(v\d+\.\d+\.\d+\)", title):
+                raise ValueError("Unrecognized NVIDIA latest version")
+            options.append({"id": "latest", "label": title})
+            continue
+        version_id = "dev" if title == "Dev" else title
+        if not re.fullmatch(r"dev|v\d+\.\d+\.\d+", version_id):
+            continue
+        options.append({"id": version_id, "label": title})
+        # NVIDIA may fall back to a different page when this page is absent.
+        if slug == f"openshell/{version_id}/{expected}":
+            pages[version_id] = "https://docs.nvidia.com/" + slug
+    if not any(option["id"] == "latest" for option in options):
+        raise ValueError("NVIDIA latest version is missing")
+    return options, pages
+
+
+def fetch_docs_versions(docs: list[dict]) -> dict | None:
+    prefix = "https://docs.nvidia.com/openshell/latest/"
+    urls = [doc["url"] for doc in docs if doc.get("url", "").startswith(prefix)]
+    if not urls:
+        return None
+    page_urls = [url for url in urls if url != prefix] or [prefix]
+    try:
+        def fetch_page(url):
+            request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
+            with urllib.request.urlopen(request, timeout=20) as response:
+                return parse_docs_switcher(response.read().decode("utf-8"), url)
+
+        with ThreadPoolExecutor(max_workers=4) as executor:
+            fetched = list(executor.map(fetch_page, page_urls))
+        versions = fetched[0][0]
+        pages = {url: result[1] for url, result in zip(page_urls, fetched)}
+        if prefix in urls:
+            pages[prefix] = {v["id"]: f"https://docs.nvidia.com/openshell/{v['id']}/" for v in versions}
+        return {"versions": versions, "pages": pages}
+    except (OSError, http.client.IncompleteRead, ValueError, KeyError, IndexError, TypeError) as exc:
+        print(f"NVIDIA docs version metadata unavailable: {type(exc).__name__}", file=sys.stderr)
+        return None
+
+
 def collect(catalog: dict) -> dict:
     headers = github_headers()
     tags_by_repo: dict[str, list[dict]] = {}
@@ -439,7 +516,10 @@ def collect(catalog: dict) -> dict:
             releases_by_repo[release_repo] = fetch_releases(release_repo, headers)
 
     generated_at = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
-    return build_status(catalog, tags_by_repo, runs_by_key, releases_by_repo, generated_at)
+    status = build_status(catalog, tags_by_repo, runs_by_key, releases_by_repo, generated_at)
+    for source, product in zip(catalog["products"], status["products"]):
+        product["docsVersions"] = fetch_docs_versions(source.get("docs") or [])
+    return status
 
 
 def main() -> int:

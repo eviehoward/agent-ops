@@ -27,6 +27,34 @@ from sync import (  # noqa: E402
 )
 
 
+class DocsVersionTest(unittest.TestCase):
+    def test_root_only_fetches_version_metadata(self):
+        root = "https://docs.nvidia.com/openshell/latest/"
+        html = b'<script id="fern-shared-island-data">{"versionSwitcher":{"versions":[{"title":"Latest (v0.1.10)","default":true}]}}</script>'
+        with patch("sync.urllib.request.urlopen", return_value=io.BytesIO(html)) as request:
+            result = sync.fetch_docs_versions([{"url": root}])
+        self.assertEqual(request.call_args.args[0].full_url, root)
+        self.assertEqual(result["versions"][0]["label"], "Latest (v0.1.10)")
+
+    def test_interrupted_docs_fetch_is_optional(self):
+        url = "https://docs.nvidia.com/openshell/latest/about/architecture"
+        with patch("sync.urllib.request.urlopen", side_effect=http.client.IncompleteRead(b"partial", 10)):
+            self.assertIsNone(sync.fetch_docs_versions([{"url": url}]))
+
+    def test_switcher_uses_published_versions_and_rejects_fallback_pages(self):
+        html = """<script id="fern-shared-island-data" type="application/json">
+        {"versionSwitcher":{"versions":[
+          {"title":"Latest (v0.1.10)","default":true},
+          {"title":"Dev","slug":"openshell/dev/about/architecture"},
+          {"title":"v0.0.116","slug":"openshell/v0.0.116/about/overview"}
+        ]}}</script>"""
+        url = "https://docs.nvidia.com/openshell/latest/about/architecture"
+        versions, pages = sync.parse_docs_switcher(html, url)
+        self.assertEqual(versions[0], {"id": "latest", "label": "Latest (v0.1.10)"})
+        self.assertEqual(pages["dev"], "https://docs.nvidia.com/openshell/dev/about/architecture")
+        self.assertNotIn("v0.0.116", pages)
+
+
 class TransportFailureTest(unittest.TestCase):
     def test_wrapped_connection_timeout_retries_then_recovers(self):
         timeout = urllib.error.URLError(TimeoutError("connection timed out"))
@@ -357,6 +385,7 @@ class ReleaseDiscoveryTest(unittest.TestCase):
         release = {"tag": "v0.1.6-rhaiv.4", "upstreamVersion": "0.1.6", "rhaivNumber": 4}
         with (
             patch("sync.github_headers", return_value={}),
+            patch("sync.fetch_docs_versions", return_value=None),
             patch("sync.fetch_image_tags", return_value=[]),
             patch("sync.fetch_workflow_index", return_value={}),
             patch("sync.fetch_releases", side_effect=lambda repo, headers: [release] if repo == "opendatahub-io/openshell" else []),
