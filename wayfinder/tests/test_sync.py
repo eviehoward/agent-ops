@@ -28,6 +28,19 @@ from sync import (  # noqa: E402
 
 
 class DocsVersionTest(unittest.TestCase):
+    def test_root_only_fetches_version_metadata(self):
+        root = "https://docs.nvidia.com/openshell/latest/"
+        html = b'<script id="fern-shared-island-data">{"versionSwitcher":{"versions":[{"title":"Latest (v0.1.10)","default":true}]}}</script>'
+        with patch("sync.urllib.request.urlopen", return_value=io.BytesIO(html)) as request:
+            result = sync.fetch_docs_versions([{"url": root}])
+        self.assertEqual(request.call_args.args[0].full_url, root)
+        self.assertEqual(result["versions"][0]["label"], "Latest (v0.1.10)")
+
+    def test_interrupted_docs_fetch_is_optional(self):
+        url = "https://docs.nvidia.com/openshell/latest/about/architecture"
+        with patch("sync.urllib.request.urlopen", side_effect=http.client.IncompleteRead(b"partial", 10)):
+            self.assertIsNone(sync.fetch_docs_versions([{"url": url}]))
+
     def test_switcher_uses_published_versions_and_rejects_fallback_pages(self):
         html = """<script id="fern-shared-island-data" type="application/json">
         {"versionSwitcher":{"versions":[

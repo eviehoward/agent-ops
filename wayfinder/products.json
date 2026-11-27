@@ -5,7 +5,6 @@
       "name": "OpenShell",
       "tagline": "Try OpenShell on OpenShift with ODH midstream images",
       "description": "OpenShell provides isolated execution environments for autonomous AI agents, governed by declarative policies. Start with the Agent Ops walkthrough, then explore public ODH midstream images and build status. Red Hat Data Services (RHDS) is the downstream source.",
-      "requirements": "For the getting-started guide: an isolated OpenShift 4.21+ test cluster, cluster administrator access, oc, Helm, Agent Sandbox, dynamic storage, and inference-provider credentials. Follow the guide for required versions and permissions.",
       "source": "https://github.com/opendatahub-io/openshell",
       "sourceLabel": "ODH midstream source",
       "releaseRepo": "opendatahub-io/openshell",
@@ -24,7 +23,7 @@
         { "title": "RHDS downstream source", "detail": "Red Hat Data Services downstream source. The public images on this page come from ODH midstream.", "url": "https://github.com/red-hat-data-services/openshell", "group": "Midstream/downstream reference" }
       ],
       "downloads": [
-        { "title": "Start here: OpenShift walkthrough", "detail": "Go from installation to your first sandboxed agent with Agent Ops. Use an isolated test cluster and the versions and permissions specified in the guide.", "url": "https://github.com/opendatahub-io/agent-ops/blob/main/guides/getting-started-openshell-openshift.md" },
+        { "title": "OpenShift walkthrough", "callout": "Start Here", "detail": "Install OpenShell and run your first sandboxed agent with the guide’s pinned versions.", "requirements": "Isolated OpenShift 4.21+ test cluster, cluster admin access, oc, Helm, Agent Sandbox, dynamic storage, and inference provider credentials.", "url": "https://github.com/opendatahub-io/agent-ops/blob/main/guides/getting-started-openshell-openshift.md" },
         { "title": "OpenShell + Dashboard installer", "detail": "Helm-based installation on OpenShift. Prepare the configuration, exact chart versions, image digests, and OIDC prerequisites described in the guide.", "url": "https://github.com/opendatahub-io/openshell/tree/main/deploy/rhoai", "value": "uv run --script --python 3.12 deploy/rhoai/install.py --config config.json" },
         { "title": "Pull gateway image", "detail": "Pull the gateway image directly from the public ODH registry.", "value": "podman pull quay.io/opendatahub/odh-openshell-gateway:odh-stable" },
         { "title": "Pull all images", "detail": "Pull all four core OpenShell images from the ODH registry.", "value": "for img in gateway supervisor sandbox cli; do podman pull quay.io/opendatahub/odh-openshell-${img}:odh-stable; done" },

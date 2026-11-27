@@ -101,14 +101,21 @@ async function copyCmd(text, feedback, original = feedback.textContent) {
   }, 1400);
 }
 
-function cmdBlock(value) {
-  const wrap = el("div", "cmd-wrap");
-  wrap.append(el("code", null, value));
-  const btn = el("button", "cmd-copy", "Copy");
-  btn.type = "button";
-  btn.addEventListener("click", () => copyCmd(value, btn));
-  wrap.append(btn);
-  return wrap;
+function cmdBlock(value, label) {
+  const pull = el("div", "image-pull");
+  const command = el("code", "image-command");
+  command.textContent = value;
+  command.tabIndex = 0;
+  const copy = el("button", "image-copy");
+  const feedback = el("span", "image-copy-icon");
+  feedback.setAttribute("aria-live", "polite");
+  copy.type = "button";
+  copy.title = label;
+  copy.setAttribute("aria-label", label);
+  copy.append(feedback);
+  copy.addEventListener("click", () => copyCmd(command.textContent, feedback, ""));
+  pull.append(command, copy);
+  return { pull, command };
 }
 
 /* ── Data fetching ──────────────────────────────────────────────────── */
@@ -172,12 +179,13 @@ function validateData(data, kind) {
     requireText(product.key, `${path}.key`);
     if (kind === "catalog") {
       requireText(product.name, `${path}.name`);
-      textFields(product, ["tagline", "description", "requirements", "sourceLabel", "releaseRepo"], path);
+      textFields(product, ["tagline", "description", "sourceLabel", "releaseRepo"], path);
       if (product.source != null) webLink(product.source, `${path}.source`);
       for (const key of ["docs", "downloads"]) {
         entries(product, key, path, (item, itemPath) => {
           requireText(item.title, `${itemPath}.title`);
           textFields(item, ["detail", "value", "icon", "group"], itemPath);
+          if (key === "downloads") textFields(item, ["callout", "requirements"], itemPath);
           if (key === "docs" || item.url != null) webLink(item.url, `${itemPath}.url`);
         });
       }
@@ -315,6 +323,7 @@ function renderTabs(product, live) {
   const bar = el("div", "tab-bar");
   for (const tab of TABS) {
     const btn = el("button", "tab-btn", tab.label);
+    btn.id = `tab-${tab.id}`;
     btn.dataset.tab = tab.id;
     btn.type = "button";
     if (tab.id === "install") btn.classList.add("active");
@@ -342,7 +351,7 @@ function renderTabContent(tabId, product, live) {
     case "status": frag.append(renderStatus(product, live)); break;
     case "releases": frag.append(renderReleases(product, live)); break;
     case "images": frag.append(renderImages(product, live)); break;
-    case "install": frag.append(renderInstall(product)); break;
+    case "install": frag.append(renderInstall(product, live)); break;
     case "docs": frag.append(renderDocs(product, live)); break;
   }
   return frag;
@@ -541,23 +550,25 @@ function renderImageCard(img, liveImg, sharedTag) {
     header.append(picker.field);
   }
 
-  const pull = el("div", "image-pull");
-  const command = el("code", "image-command");
-  command.tabIndex = 0;
-  const copy = el("button", "image-copy");
-  const feedback = el("span", "image-copy-icon");
-  feedback.setAttribute("aria-live", "polite");
-  copy.type = "button";
-  copy.title = "Copy pull command";
-  copy.setAttribute("aria-label", `Copy pull command for ${img.name}`);
-  copy.append(feedback);
-  copy.addEventListener("click", () => copyCmd(command.textContent, feedback, ""));
-  pull.append(command, copy);
-  const updated = el("p", "image-meta image-timestamp");
-  const digest = el("code", "image-digest");
-  const registry = el("div", "image-registry");
-  registry.append(digest, quayLink);
-  card.append(pull, updated, registry);
+  const { pull, command } = cmdBlock("", `Copy pull command for ${img.name}`);
+  const meta = el("div", "image-tag-meta");
+  const updated = el("span", "image-meta image-timestamp");
+  const separator = el("span", "image-meta-separator", "·");
+  separator.setAttribute("aria-hidden", "true");
+  const toggle = el("button", "image-digest-toggle");
+  toggle.type = "button";
+  const digest = el("code", "image-digest image-selected-digest");
+  digest.id = `image-sha-${encodeURIComponent(img.repository)}`;
+  toggle.setAttribute("aria-controls", digest.id);
+  toggle.addEventListener("click", () => showDigest(digest.hidden));
+  meta.append(updated, separator, toggle, quayLink);
+  card.append(pull, meta, digest);
+
+  function showDigest(visible) {
+    digest.hidden = !visible;
+    toggle.textContent = visible ? "Hide digest" : "Show digest";
+    toggle.setAttribute("aria-expanded", String(visible));
+  }
 
   function update() {
     const component = sharedTag?.();
@@ -565,7 +576,10 @@ function renderImageCard(img, liveImg, sharedTag) {
     const metadata = component || tags.get(tag);
     command.textContent = `podman pull ${img.repository}:${tag}`;
     updated.textContent = metadata?.lastModified ? `Tag updated ${formatDate(metadata.lastModified)}` : "";
-    digest.textContent = metadata?.digest || "Digest unavailable in this snapshot";
+    digest.textContent = metadata?.digest || "";
+    toggle.hidden = !digest.textContent;
+    separator.hidden = toggle.hidden || !updated.textContent;
+    showDigest(false);
   }
 
   if (picker) {
@@ -602,6 +616,16 @@ function renderImageCard(img, liveImg, sharedTag) {
   return { card, update };
 }
 
+function coreImageReleases(core, live) {
+  const releases = new Map();
+  for (const release of live?.releases || []) {
+    if (!release.allBuilt) continue;
+    const components = new Map(release.components.filter(c => c.found).map(c => [c.repository, c]));
+    if (core.every(image => components.has(image.repository))) releases.set(release.tag, components);
+  }
+  return releases;
+}
+
 function renderImages(product, live) {
   const section = el("div", "section");
   const intro = el("header", "images-intro");
@@ -624,12 +648,7 @@ function renderImages(product, live) {
     const title = el("div");
     title.append(el("h3", null, "Core images"));
     title.append(el("p", null, "Each release tag is available for all core images."));
-    const releases = new Map();
-    for (const release of live?.releases || []) {
-      if (!release.allBuilt) continue;
-      const components = new Map(release.components.filter(c => c.found).map(c => [c.repository, c]));
-      if (core.every(image => components.has(image.repository))) releases.set(release.tag, components);
-    }
+    const releases = coreImageReleases(core, live);
     const defaults = new Set(core.map(defaultImageTag));
     const defaultLabel = defaults.size !== 1 ? "Default tags"
       : defaults.has("odh-stable") ? "odh-stable (rolling)" : defaultImageTag(core[0]);
@@ -747,41 +766,86 @@ function renderStatus(product, live) {
   return section;
 }
 
-function renderInstallGrid(downloads, page) {
+function renderInstallGrid(downloads, page, groupId) {
   const container = el("div", null);
-  container.id = "install-grid";
+  container.id = groupId;
   const { items, totalPages } = paginate(downloads, page);
   const grid = el("div", "cards install-options");
   for (const dl of items) {
     const card = el("div", "card");
-    const info = el("div", "install-info");
-    info.append(el("h3", null, dl.title));
+    const header = el("header", "image-header");
+    const info = el("div", "install-info image-title");
+    const heading = el("div", "install-heading");
+    heading.append(el("h4", null, dl.title));
+    if (dl.callout) {
+      heading.append(el("span", "install-callout", dl.callout));
+    }
+    info.append(heading);
     if (dl.detail) info.append(el("p", null, dl.detail));
+    if (dl.requirements) {
+      const requirements = el("p", "install-requirements");
+      requirements.append(el("strong", null, "Requirements: "), document.createTextNode(dl.requirements));
+      info.append(requirements);
+    }
+    header.append(info);
+    card.append(header);
     const actions = el("div", "install-actions");
-    if (dl.value) actions.append(cmdBlock(dl.value));
-    if (dl.url) actions.append(extLink(dl.url, "Open guide →", "btn btn-secondary"));
-    card.append(info, actions);
+    if (dl.value) {
+      const { pull } = cmdBlock(dl.value, `Copy command for ${dl.title}`);
+      actions.append(pull);
+    }
+    if (dl.url) {
+      const footer = el("footer", "install-guide");
+      footer.append(extLink(dl.url, "Open guide →", "btn btn-secondary"));
+      actions.append(footer);
+    }
+    if (dl.value || dl.url) card.append(actions);
     grid.append(card);
   }
   container.append(grid);
   const pager = renderPager(page, totalPages, p => {
-    document.getElementById("install-grid").replaceWith(renderInstallGrid(downloads, p));
+    document.getElementById(groupId).replaceWith(renderInstallGrid(downloads, p, groupId));
   });
   if (pager) container.append(pager);
   return container;
 }
 
-function renderInstall(p) {
-  const section = el("div", "section");
+function renderInstall(p, live) {
+  const section = el("div", "section install-section");
   section.append(el("h2", null, "Install"));
-  section.append(el("p", "section-lead", "Start with the OpenShift walkthrough. Its pinned versions and experimental test-cluster setup are separate from the newest image builds listed here."));
-  if (p.requirements) {
-    const req = el("div", "requirements");
-    req.append(el("strong", null, "Requirements: "));
-    req.append(document.createTextNode(p.requirements));
-    section.append(req);
+  function tabLink(tabId, label) {
+    const link = el("a", "section-lead-link", label);
+    const targetId = `tab-${tabId}`;
+    link.href = `#${targetId}`;
+    link.addEventListener("click", event => {
+      event.preventDefault();
+      switchTab(tabId, p, live);
+      document.getElementById(targetId)?.focus();
+    });
+    return link;
   }
-  section.append(renderInstallGrid(p.downloads || [], 1));
+  const lead = el("p", "section-lead");
+  lead.append(
+    document.createTextNode("Start with the OpenShift walkthrough. For more info, see the "),
+    tabLink("docs", "documentation"),
+    document.createTextNode(" tab. For a full list of available images, see "),
+    tabLink("images", "Container Images"),
+    document.createTextNode("."),
+  );
+  section.append(lead);
+  const downloads = p.downloads || [];
+  const groups = [
+    ["Getting started", "install-getting-started", downloads.filter(dl => dl.url)],
+    ["Quick install", "install-quick", downloads.filter(dl => !dl.url)],
+  ];
+  for (const [title, id, items] of groups) {
+    if (!items.length) continue;
+    const group = el("section", "install-group");
+    const header = el("header", "image-group-header install-group-header");
+    header.append(el("h3", null, title));
+    group.append(header, renderInstallGrid(items, 1, id));
+    section.append(group);
+  }
   return section;
 }
 
@@ -810,10 +874,13 @@ function renderDocs(p, live) {
     header.append(heading);
     const nvidia = name === "NVIDIA OpenShell documentation";
     const metadata = live?.docsVersions;
+    const latestVersion = metadata?.versions?.find(v => v.id === "latest")?.label.match(/^Latest \((v\d+\.\d+\.\d+)\)$/)?.[1];
     const grid = el("div", "cards docs-cards");
     function updateCards(version) {
       const cards = docs.map(doc => {
-        const url = !nvidia || version === "latest" ? doc.url : metadata?.pages?.[doc.url]?.[version];
+        const url = !nvidia ? doc.url : version === "latest"
+          ? (latestVersion ? doc.url.replace("/openshell/latest/", `/openshell/${latestVersion}/`) : doc.url)
+          : metadata?.pages?.[doc.url]?.[version];
         const card = url ? extLink(url, null, "card doc-card") : el("div", "card doc-card doc-unavailable");
         card.append(el("h4", null, doc.title));
         if (doc.detail) card.append(el("p", null, doc.detail));

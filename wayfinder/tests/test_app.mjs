@@ -39,6 +39,7 @@ class Element {
   }
   setAttribute(key, value) { this.attributes[key] = value; }
   addEventListener(event, handler) { this.listeners[event] = handler; }
+  focus() { this.focused = true; }
   querySelectorAll(selector) {
     return descendants(this).filter(node => node.className.split(/\s+/).includes(selector.slice(1)));
   }
@@ -91,9 +92,56 @@ test("Get started and the first install card open the Agent Ops guide", async ()
   const nodes = descendants(roots["content-inner"]);
   assert.equal(nodes.find(n => n.textContent === "Get started →").href, guide);
   const card = nodes.find(n => n.className === "card");
+  const callouts = nodes.filter(n => n.className === "install-callout");
+  assert.deepEqual(callouts.map(n => n.textContent), ["Start Here"]);
+  assert.deepEqual(callouts[0].parent.children.map(n => n.textContent), ["OpenShift walkthrough", "Start Here"]);
+  const requirements = nodes.filter(n => n.textContent && n.tagName === "strong" && n.textContent.trim() === "Requirements:");
+  assert.equal(requirements.length, 1);
+  assert.ok(descendants(card).includes(requirements[0]));
+  assert.match(requirements[0].parent.textContent, /OpenShift 4\.21\+ test cluster/);
   assert.equal(descendants(card).find(n => n.tagName === "a").href, guide);
   assert.equal(descendants(card).filter(n => n.tagName === "code").length, 0);
   assert.equal(roots["content-inner"].textContent.includes("undefined"), false);
+});
+
+test("Install description links open and focus their dashboard tabs", async () => {
+  const { document } = await boot();
+  const pane = document.getElementById("tab-pane");
+  for (const [id, label, heading] of [
+    ["docs", "documentation", "Documentation"],
+    ["images", "Container Images", "Container images"],
+  ]) {
+    const lead = pane.querySelectorAll(".section-lead")[0];
+    const link = lead.children.find(child => child.textContent === label);
+    const tab = document.getElementById(`tab-${id}`);
+    assert.equal(link.href, `#${tab.id}`);
+    let prevented = false;
+    link.listeners.click({ preventDefault() { prevented = true; } });
+    assert.ok(prevented);
+    assert.ok(tab.focused);
+    assert.match(tab.className, /\bactive\b/);
+    assert.equal(descendants(pane).find(node => node.tagName === "h2").textContent, heading);
+    document.getElementById("tab-install").listeners.click();
+  }
+});
+
+test("Quick install shows the stable pull commands and Python SDK command", async () => {
+  const { document } = await boot();
+  const grid = document.getElementById("install-quick");
+  const pickers = descendants(grid).filter(node => node.tagName === "select");
+  assert.equal(pickers.length, 0);
+  const commands = descendants(grid).filter(node => node.tagName === "code");
+  assert.equal(commands.length, 3);
+  for (const command of commands) {
+    assert.equal(command.parent.className, "image-pull");
+    const actions = command.parent.parent;
+    assert.equal(actions.className, "install-actions");
+    assert.equal(actions.parent.children[0].tagName, "header");
+    assert.equal(command.parent.children[1].className, "image-copy");
+  }
+  assert.match(commands[0].textContent, /:odh-stable$/);
+  assert.ok(commands[1].textContent.endsWith("${img}:odh-stable; done"));
+  assert.equal(commands[2].textContent, "uv add openshell");
 });
 
 test("Dashboard and testing appears before the alternative sandboxes without a fresh snapshot", async () => {
@@ -112,6 +160,49 @@ test("Dashboard and testing appears before the alternative sandboxes without a f
   const codex = cards[3];
   assert.equal(codex.querySelectorAll(".image-command")[0].textContent,
     "podman pull quay.io/aipcc/base-images/agentic/codex:0.167.0");
+});
+
+test("the SHA disclosure follows the selected tag and hides when a digest is unavailable", async () => {
+  const { context } = await boot();
+  context.image = { name: "Gateway", repository: "quay.io/example/gateway" };
+  context.liveImage = {
+    pull: { name: "odh-stable", digest: "sha256:stable", lastModified: "2026-11-27T05:09:00Z" },
+    channels: [{ name: "next", digest: "sha256:next" }, { name: "pending" }],
+  };
+  const { card } = vm.runInContext("renderImageCard(image, liveImage)", context);
+  const [toggle] = card.querySelectorAll(".image-digest-toggle");
+  const [digest] = card.querySelectorAll(".image-selected-digest");
+  const [separator] = card.querySelectorAll(".image-meta-separator");
+  const [quayLink] = card.querySelectorAll(".image-quay-link");
+  const picker = descendants(card).find(node => node.tagName === "select");
+
+  assert.equal(toggle.parent, quayLink.parent);
+  assert.equal(toggle.attributes["aria-controls"], digest.id);
+  assert.equal(toggle.attributes["aria-expanded"], "false");
+  assert.equal(toggle.textContent, "Show digest");
+  assert.equal(digest.hidden, true);
+  assert.equal(separator.hidden, false);
+
+  toggle.listeners.click();
+  assert.equal(toggle.attributes["aria-expanded"], "true");
+  assert.equal(toggle.textContent, "Hide digest");
+  assert.equal(digest.hidden, false);
+  assert.equal(digest.textContent, "sha256:stable");
+  toggle.listeners.click();
+  assert.equal(digest.hidden, true);
+  toggle.listeners.click();
+
+  picker.value = "next";
+  picker.listeners.change();
+  assert.equal(digest.hidden, true);
+  assert.equal(separator.hidden, true);
+  toggle.listeners.click();
+  assert.equal(digest.textContent, "sha256:next");
+
+  picker.value = "pending";
+  picker.listeners.change();
+  assert.equal(toggle.hidden, true);
+  assert.equal(digest.hidden, true);
 });
 
 test("documentation shows all grouped guides without pagination", async () => {
@@ -153,7 +244,8 @@ test("NVIDIA documentation selector changes links and handles missing pages", as
   assert.equal(cards.find(card => card.textContent.includes("Getting started")).href, guide);
   picker.value = "latest";
   picker.listeners.change();
-  assert.equal(section.querySelectorAll(".doc-card").find(card => card.textContent.includes("Architecture")).href, architecture);
+  assert.equal(section.querySelectorAll(".doc-card").find(card => card.textContent.includes("Architecture")).href,
+    "https://docs.nvidia.com/openshell/v0.1.10/about/architecture");
 });
 
 test("a published E2E image cannot override a failing CI run", async () => {

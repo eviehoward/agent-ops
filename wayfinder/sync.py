@@ -467,7 +467,7 @@ def fetch_docs_versions(docs: list[dict]) -> dict | None:
     urls = [doc["url"] for doc in docs if doc.get("url", "").startswith(prefix)]
     if not urls:
         return None
-    page_urls = [url for url in urls if url != prefix]
+    page_urls = [url for url in urls if url != prefix] or [prefix]
     try:
         def fetch_page(url):
             request = urllib.request.Request(url, headers={"User-Agent": USER_AGENT})
@@ -481,7 +481,7 @@ def fetch_docs_versions(docs: list[dict]) -> dict | None:
         if prefix in urls:
             pages[prefix] = {v["id"]: f"https://docs.nvidia.com/openshell/{v['id']}/" for v in versions}
         return {"versions": versions, "pages": pages}
-    except (OSError, ValueError, KeyError, IndexError, TypeError) as exc:
+    except (OSError, http.client.IncompleteRead, ValueError, KeyError, IndexError, TypeError) as exc:
         print(f"NVIDIA docs version metadata unavailable: {type(exc).__name__}", file=sys.stderr)
         return None
 
